@@ -24,6 +24,15 @@ pub struct NextAction<'a> {
     pub lifecycle: u8,
 }
 
+struct ActionContext<'a> {
+    step: &'a PlanStep,
+    model: &'a str,
+    action: &'static str,
+    lifecycle: u8,
+    diff_path: Option<&'a Path>,
+    resume_prompt: Option<String>,
+}
+
 pub fn next_action<'a>(
     steps: &'a StepsFile,
     state: &StateFile,
@@ -112,6 +121,20 @@ pub fn run_lifecycle(
         None
     };
 
+    let resume_prompt = if step_state == StepState::LifecycleError(lifecycle) {
+        Some(generate_resume_prompt(
+            config,
+            options,
+            logger,
+            step,
+            lifecycle,
+            action_label,
+            diff_path.as_deref(),
+        )?)
+    } else {
+        None
+    };
+
     let execution_result = if lifecycle == 5 {
         run_gates(config, options, logger)
             .and_then(|()| run_git_commit(step, options, logger, lifecycle))
@@ -123,6 +146,7 @@ pub fn run_lifecycle(
             action: action_label,
             lifecycle,
             diff_path: diff_path.as_deref(),
+            resume_prompt,
         };
         run_cli_action(config, options, logger, &action)
             .and_then(|()| run_gates(config, options, logger))
@@ -190,14 +214,6 @@ fn lifecycle_mapping(lifecycle: u8) -> Result<(StepState, StepState, &'static st
     Ok(mapping)
 }
 
-struct ActionContext<'a> {
-    step: &'a PlanStep,
-    model: &'a str,
-    action: &'static str,
-    lifecycle: u8,
-    diff_path: Option<&'a Path>,
-}
-
 fn run_cli_action(
     config: &Config,
     options: &RunOptions,
@@ -231,6 +247,7 @@ fn build_tool_command(
         options,
         action.diff_path,
         action.lifecycle,
+        action.resume_prompt.as_deref(),
     );
     let mut args = config.cli_args.clone();
 
@@ -244,6 +261,7 @@ fn build_tool_command(
             args.push("--workspace".to_string());
             args.push(options.workdir.display().to_string());
             args.push("--force".to_string());
+            args.push("agent".to_string());
             args.push(prompt);
         }
         ToolType::Opencode => {
@@ -269,11 +287,15 @@ fn build_prompt(
     options: &RunOptions,
     diff_path: Option<&Path>,
     lifecycle: u8,
+    resume_prompt: Option<&str>,
 ) -> String {
     let diff_info = diff_path.map_or_else(
         || "Diff file: none".to_string(),
         |path| format!("Diff file: {}", path.display()),
     );
+    let resume_text = resume_prompt.map_or_else(String::new, |prompt| {
+        format!("\nResume analysis:\n{prompt}\n")
+    });
     format!(
         "You are running non-interactively. Do not ask for confirmation. \
 Action: {action}\n\
@@ -282,6 +304,7 @@ Plan file: {plan}\n\
 Step ID: {step_id}\n\
 Step text: {step_text}\n\
 {diff_info}\n\
+{resume_text}\
 Execute the step, apply necessary changes, and exit.",
         action = action,
         lifecycle = lifecycle,
@@ -291,10 +314,169 @@ Execute the step, apply necessary changes, and exit.",
     )
 }
 
+fn generate_resume_prompt(
+    config: &Config,
+    options: &RunOptions,
+    logger: &Logger,
+    step: &PlanStep,
+    lifecycle: u8,
+    action_label: &str,
+    diff_path: Option<&Path>,
+) -> Result<String> {
+    logger.log_substep("Generating resume prompt via agent");
+    let log_tail = tail_file(logger.log_path(), 120);
+    let diff_info = diff_path.map_or_else(
+        || "Diff file: none".to_string(),
+        |path| format!("Diff file: {}", path.display()),
+    );
+    let analysis_prompt = format!(
+        "You are analyzing a failed agent run. Do not modify files. \
+Summarize the failure and output a short restart prompt.\n\
+Lifecycle: {lifecycle}\n\
+Action: {action}\n\
+Plan file: {plan}\n\
+Step ID: {step_id}\n\
+Step text: {step_text}\n\
+{diff_info}\n\
+Log tail:\n{log_tail}\n\
+Respond with only the restart prompt text.",
+        lifecycle = lifecycle,
+        action = action_label,
+        plan = options.plan_path.display(),
+        step_id = step.id,
+        step_text = step.text
+    );
+
+    let tool_type = config.tool_type.unwrap_or(ToolType::Cursor);
+    let programs = config.resolve_programs();
+    let mut args = config.cli_args.clone();
+    match tool_type {
+        ToolType::Cursor => {
+            args.push("--print".to_string());
+            args.push("--output-format".to_string());
+            args.push("text".to_string());
+            args.push("--model".to_string());
+            args.push(config.model_for(lifecycle));
+            args.push("--workspace".to_string());
+            args.push(options.workdir.display().to_string());
+            args.push("--sandbox".to_string());
+            args.push("enabled".to_string());
+            args.push("agent".to_string());
+            args.push(analysis_prompt);
+        }
+        ToolType::Opencode => {
+            args.push("run".to_string());
+            args.push("--model".to_string());
+            args.push(config.model_for(lifecycle));
+            args.push(analysis_prompt);
+        }
+    }
+
+    let output = run_command_capture_with_fallback(
+        &programs,
+        &args,
+        Some(&options.workdir),
+        logger,
+        "resume analysis",
+    )?;
+    Ok(truncate_output(&output, 2000))
+}
+
+fn run_command_capture_with_fallback(
+    programs: &[String],
+    args: &[String],
+    workdir: Option<&Path>,
+    logger: &Logger,
+    label: &str,
+) -> Result<String> {
+    for program in programs {
+        match run_command_capture_once(program, args, workdir, logger, label) {
+            Ok(output) => return Ok(output),
+            Err(CommandError::NotFound(not_found)) => {
+                logger.log_error_verbose(
+                    "Command not found",
+                    &[format!("Program: {not_found}"), format!("Label: {label}")],
+                );
+            }
+            Err(CommandError::Other(err)) => {
+                return Err(err).with_context(|| format!("command execution failed: {label}"));
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "none of the candidate commands were found on PATH: {}",
+        programs.join(", ")
+    ))
+}
+
+fn run_command_capture_once(
+    program: &str,
+    args: &[String],
+    workdir: Option<&Path>,
+    logger: &Logger,
+    label: &str,
+) -> Result<String, CommandError> {
+    logger.log_substep(&format!(
+        "Executing {}: {} {}",
+        label,
+        program,
+        args.join(" ")
+    ));
+    let mut command = Command::new(program);
+    command.args(args);
+    if let Some(workdir) = workdir {
+        command.current_dir(workdir);
+    }
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CommandError::NotFound(program.to_string()));
+        }
+        Err(err) => {
+            return Err(CommandError::Other(
+                anyhow!(err).context(format!("failed to run command: {program}")),
+            ));
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stdout.lines() {
+        logger.log_output(line);
+    }
+    for line in stderr.lines() {
+        logger.log_output(line);
+    }
+    if !output.status.success() {
+        return Err(CommandError::Other(anyhow!(
+            "command failed ({label}): {}",
+            output.status
+        )));
+    }
+    Ok(stdout.to_string())
+}
+
+fn tail_file(path: &Path, max_lines: usize) -> String {
+    let contents = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lines: Vec<&str> = contents.lines().collect();
+    if lines.len() > max_lines {
+        lines.drain(0..lines.len() - max_lines);
+    }
+    lines.join("\n")
+}
+
+fn truncate_output(output: &str, max_chars: usize) -> String {
+    if output.len() <= max_chars {
+        return output.trim().to_string();
+    }
+    let start = output.len().saturating_sub(max_chars);
+    output[start..].trim().to_string()
+}
+
 fn run_gates(config: &Config, options: &RunOptions, logger: &Logger) -> Result<()> {
     logger.log_step("Gates: lint/build/test");
     let gates = if config.gates.is_empty() {
-        default_gates()
+        default_gates(&options.workdir, logger)
     } else {
         config.gates.clone()
     };
@@ -314,12 +496,17 @@ fn run_gates(config: &Config, options: &RunOptions, logger: &Logger) -> Result<(
     Ok(())
 }
 
-fn default_gates() -> Vec<GateCommand> {
+fn default_gates(workdir: &Path, logger: &Logger) -> Vec<GateCommand> {
+    let cargo_manifest = workdir.join("Cargo.toml");
+    if !cargo_manifest.is_file() {
+        logger.log_substep("Skipping default gates (no Cargo.toml found)");
+        return Vec::new();
+    }
     vec![
         GateCommand {
             name: Some("fmt-check".to_string()),
             command: "cargo".to_string(),
-            args: vec!["fmt".to_string(), "--".to_string(), "--check".to_string()],
+            args: vec!["fmt".to_string(), "--check".to_string()],
         },
         GateCommand {
             name: Some("clippy".to_string()),
@@ -471,17 +658,25 @@ fn run_command_once(
         .ok_or_else(|| CommandError::Other(anyhow!("missing stderr")))?;
     let logger_stdout = logger.clone();
     let logger_stderr = logger.clone();
+    let stdout_lines: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_lines: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stdout_lines_handle = std::sync::Arc::clone(&stdout_lines);
+    let stderr_lines_handle = std::sync::Arc::clone(&stderr_lines);
 
     let stdout_handle = std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
             logger_stdout.log_output(&line);
+            push_tail(&stdout_lines_handle, line, 20);
         }
     });
     let stderr_handle = std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines().map_while(Result::ok) {
             logger_stderr.log_output(&line);
+            push_tail(&stderr_lines_handle, line, 20);
         }
     });
 
@@ -495,12 +690,16 @@ fn run_command_once(
     if !status.success() {
         let stderr_tail = format!("Exit status: {status}");
         let command_line = format!("{program} {}", args.join(" "));
+        let stdout_tail_lines = drain_tail(&stdout_lines);
+        let stderr_tail_lines = drain_tail(&stderr_lines);
         let detail = vec![
             format!("Program: {program}"),
             format!("Label: {label}"),
             format!("Args: {}", args.join(" ")),
             format!("Command: {command_line}"),
             stderr_tail,
+            format!("Stdout tail: {}", stdout_tail_lines.join(" | ")),
+            format!("Stderr tail: {}", stderr_tail_lines.join(" | ")),
         ];
         logger.log_error_verbose("Command failed", &detail);
         return Err(CommandError::Other(anyhow!(
@@ -511,12 +710,36 @@ fn run_command_once(
     Ok(())
 }
 
+fn push_tail(lines: &std::sync::Mutex<Vec<String>>, line: String, limit: usize) {
+    if let Ok(mut guard) = lines.lock() {
+        guard.push(line);
+        if guard.len() > limit {
+            let drain_count = guard.len() - limit;
+            guard.drain(0..drain_count);
+        }
+    }
+}
+
+fn drain_tail(lines: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+    lines.lock().map(|guard| guard.clone()).unwrap_or_default()
+}
+
 fn run_git_commit(
     step: &PlanStep,
     options: &RunOptions,
     logger: &Logger,
     lifecycle: u8,
 ) -> Result<()> {
+    let status_output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&options.workdir)
+        .output()
+        .context("failed to check git status")?;
+    let status_text = String::from_utf8_lossy(&status_output.stdout);
+    if status_text.trim().is_empty() {
+        logger.log_substep("No changes to commit; skipping git commit");
+        return Ok(());
+    }
     let message = format!(
         "stage implemented-finalized: step {} - {}",
         step.number, step.text

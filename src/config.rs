@@ -77,12 +77,12 @@ impl Config {
             .get(&key)
             .and_then(|config| config.model.clone());
         if let Some(model) = from_config {
-            return model;
+            return normalize_model(&model);
         }
         match lifecycle {
-            2 | 4 | 5 => "opus 4.5 max mode".to_string(),
-            3 => "codex 5.2 max mode".to_string(),
-            _ => "gpt codex 5.2 max mode".to_string(),
+            2 | 4 | 5 => "opus-4.5".to_string(),
+            3 => "gpt-5.2-codex".to_string(),
+            _ => "gpt-5.2-codex-high".to_string(),
         }
     }
 
@@ -118,6 +118,18 @@ fn push_unique(programs: &mut Vec<String>, value: &str) {
     }
 }
 
+fn normalize_model(model: &str) -> String {
+    match model.trim().to_lowercase().as_str() {
+        "gpt codex 5.2 max mode" | "codex 5.2 max mode" => "gpt-5.2-codex-high",
+        "gpt codex 5.2" | "codex 5.2" => "gpt-5.2-codex",
+        "opus 4.5 max mode" => "opus-4.5",
+        "opus 4.5 thinking" => "opus-4.5-thinking",
+        "gpt 5.2" => "gpt-5.2",
+        _ => model,
+    }
+    .to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -143,7 +155,17 @@ mod tests {
         }"#;
         let config: Config = serde_json::from_str(json).expect("valid config");
         assert_eq!(config.model_for(1), "custom-model");
-        assert_eq!(config.model_for(2), "opus 4.5 max mode");
+        assert_eq!(config.model_for(2), "opus-4.5");
+    }
+
+    #[test]
+    fn normalizes_legacy_model_names() {
+        let json = r#"{
+            "cli-program": "cursor",
+            "lifecycles": { "1": { "model": "gpt codex 5.2 max mode" } }
+        }"#;
+        let config: Config = serde_json::from_str(json).expect("valid config");
+        assert_eq!(config.model_for(1), "gpt-5.2-codex-high");
     }
 
     #[test]
