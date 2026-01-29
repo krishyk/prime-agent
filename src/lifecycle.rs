@@ -65,13 +65,18 @@ pub fn run_lifecycle(
     logger.log_substep(&format!("Log file: {}", logger.log_path().display()));
 
     let diff_path = if options.lifecycle >= 2 {
-        Some(write_git_diff(&options.workdir, logger)?)
+        Some(
+            write_git_diff(&options.workdir, logger)
+                .with_context(|| "failed to capture git diff")?,
+        )
     } else {
         None
     };
 
     let execution_result = if options.lifecycle == 5 {
-        run_gates(config, options, logger).and_then(|()| run_git_commit(step, options, logger))
+        run_gates(config, options, logger)
+            .and_then(|()| run_git_commit(step, options, logger))
+            .with_context(|| format!("lifecycle {}: git commit failed", options.lifecycle))
     } else {
         run_cli_action(
             config,
@@ -83,17 +88,36 @@ pub fn run_lifecycle(
             logger,
         )
         .and_then(|()| run_gates(config, options, logger))
-    };
+        .with_context(|| format!("lifecycle {}: agent action failed", options.lifecycle))
+    }
+    .with_context(|| {
+        format!(
+            "step {} (id {}) action {}",
+            step.number, step.id, action_label
+        )
+    });
 
     if let Err(err) = execution_result {
+        let details = vec![
+            format!("Lifecycle: {}", options.lifecycle),
+            format!("Action: {}", action_label),
+            format!("Step ID: {}", step.id),
+            format!("Step number: {}", step.number),
+            format!("Step text: {}", step.text),
+            format!("Workdir: {}", options.workdir.display()),
+            format!("State file: {}", options.state_path.display()),
+        ];
         state.set_state(&step.id, StepState::lifecycle_error(options.lifecycle));
         if let Err(save_err) = state.save(&options.state_path) {
             logger.log_error(&format!("Failed to save error state: {save_err}"));
         }
-        logger.log_error(&format!(
-            "Lifecycle {lifecycle} failed: {err}",
-            lifecycle = options.lifecycle
-        ));
+        logger.log_error_verbose(
+            &format!(
+                "Lifecycle {lifecycle} failed: {err}",
+                lifecycle = options.lifecycle
+            ),
+            &details,
+        );
         return Err(err);
     }
 
@@ -143,14 +167,20 @@ fn run_cli_action(
     diff_path: Option<&Path>,
     logger: &Logger,
 ) -> Result<()> {
-    let (program, args) = build_tool_command(config, step, model, action, options, diff_path);
-    run_command(
-        &program,
+    let (programs, args) = build_tool_command(config, step, model, action, options, diff_path);
+    run_command_with_fallback(
+        &programs,
         &args,
         Some(&options.workdir),
         logger,
         &format!("agent action ({action})"),
     )
+    .with_context(|| {
+        format!(
+            "failed to run agent tool for lifecycle {}",
+            options.lifecycle
+        )
+    })
 }
 
 fn build_tool_command(
@@ -160,9 +190,9 @@ fn build_tool_command(
     action: &str,
     options: &RunOptions,
     diff_path: Option<&Path>,
-) -> (String, Vec<String>) {
+) -> (Vec<String>, Vec<String>) {
     let tool_type = config.tool_type.unwrap_or(ToolType::Cursor);
-    let program = config.resolve_program();
+    let programs = config.resolve_programs();
     let prompt = build_prompt(step, action, options, diff_path);
     let mut args = config.cli_args.clone();
 
@@ -191,7 +221,7 @@ fn build_tool_command(
         }
     }
 
-    (program, args)
+    (programs, args)
 }
 
 fn build_prompt(
@@ -232,8 +262,8 @@ fn run_gates(config: &Config, options: &RunOptions, logger: &Logger) -> Result<(
     for gate in gates {
         let name = gate.name.unwrap_or_else(|| gate.command.clone());
         logger.log_substep(&format!("Running gate: {name}"));
-        run_command(
-            &gate.command,
+        run_command_with_fallback(
+            std::slice::from_ref(&gate.command),
             &gate.args,
             Some(&options.workdir),
             logger,
@@ -300,13 +330,53 @@ fn write_git_diff(workdir: &Path, logger: &Logger) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn run_command(
-    program: &str,
+fn run_command_with_fallback(
+    programs: &[String],
     args: &[String],
     workdir: Option<&Path>,
     logger: &Logger,
     label: &str,
 ) -> Result<()> {
+    let mut last_error = None;
+    for program in programs {
+        match run_command_once(program, args, workdir, logger, label) {
+            Ok(()) => return Ok(()),
+            Err(CommandError::NotFound(not_found)) => {
+                logger.log_error_verbose(
+                    "Command not found",
+                    &[format!("Program: {not_found}"), format!("Label: {label}")],
+                );
+                last_error = Some(CommandError::NotFound(not_found));
+            }
+            Err(CommandError::Other(err)) => {
+                return Err(err).with_context(|| format!("command execution failed: {label}"));
+            }
+        }
+    }
+
+    match last_error {
+        Some(CommandError::NotFound(_)) => Err(anyhow!(
+            "none of the candidate commands were found on PATH: {}",
+            programs.join(", ")
+        ))
+        .with_context(|| format!("command candidates: {}", programs.join(", "))),
+        Some(CommandError::Other(err)) => Err(err),
+        None => Err(anyhow!("no command candidates provided")),
+    }
+}
+
+enum CommandError {
+    NotFound(String),
+    Other(anyhow::Error),
+}
+
+fn run_command_once(
+    program: &str,
+    args: &[String],
+    workdir: Option<&Path>,
+    logger: &Logger,
+    label: &str,
+) -> Result<(), CommandError> {
     logger.log_substep(&format!(
         "Executing {}: {} {}",
         label,
@@ -322,9 +392,17 @@ fn run_command(
     if let Some(workdir) = workdir {
         command.current_dir(workdir);
     }
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("failed to run command: {program}"))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CommandError::NotFound(program.to_string()));
+        }
+        Err(err) => {
+            return Err(CommandError::Other(
+                anyhow!(err).context(format!("failed to run command: {program}")),
+            ));
+        }
+    };
 
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
@@ -335,8 +413,14 @@ fn run_command(
     spinner.set_message(format!("Running {label}"));
     spinner.enable_steady_tick(Duration::from_millis(120));
 
-    let stdout = child.stdout.take().context("missing stdout")?;
-    let stderr = child.stderr.take().context("missing stderr")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| CommandError::Other(anyhow!("missing stdout")))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| CommandError::Other(anyhow!("missing stderr")))?;
     let logger_stdout = logger.clone();
     let logger_stderr = logger.clone();
 
@@ -353,13 +437,25 @@ fn run_command(
         }
     });
 
-    let status = child.wait().context("failed waiting for command")?;
+    let status = child
+        .wait()
+        .map_err(|err| CommandError::Other(anyhow!(err).context("failed waiting for command")))?;
     let _ = stdout_handle.join();
     let _ = stderr_handle.join();
     spinner.finish_and_clear();
 
     if !status.success() {
-        return Err(anyhow!("command failed ({label}): {status}"));
+        let stderr_tail = format!("Exit status: {status}");
+        let detail = vec![
+            format!("Program: {program}"),
+            format!("Label: {label}"),
+            format!("Args: {}", args.join(" ")),
+            stderr_tail,
+        ];
+        logger.log_error_verbose("Command failed", &detail);
+        return Err(CommandError::Other(anyhow!(
+            "command failed ({label}): {status}"
+        )));
     }
 
     Ok(())
@@ -370,15 +466,15 @@ fn run_git_commit(step: &PlanStep, options: &RunOptions, logger: &Logger) -> Res
         "stage implemented-finalized: step {} - {}",
         step.number, step.text
     );
-    run_command(
-        "git",
+    run_command_with_fallback(
+        &["git".to_string()],
         &["add".to_string(), ".".to_string()],
         Some(&options.workdir),
         logger,
         "git add",
     )?;
-    run_command(
-        "git",
+    run_command_with_fallback(
+        &["git".to_string()],
         &["commit".to_string(), "-m".to_string(), message],
         Some(&options.workdir),
         logger,

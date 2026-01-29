@@ -65,6 +65,16 @@ impl Logger {
         self.write_line(message);
     }
 
+    /// Log error details with verbose output enforced.
+    pub fn log_error_verbose(&self, message: &str, details: &[String]) {
+        eprintln!("{message}");
+        self.write_line(message);
+        for line in details {
+            eprintln!("{line}");
+            self.write_line(line);
+        }
+    }
+
     fn write_line(&self, line: &str) {
         if let Ok(mut file) = self.file.lock() {
             let _ = writeln!(file, "{line}");

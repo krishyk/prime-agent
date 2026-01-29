@@ -86,15 +86,35 @@ impl Config {
         }
     }
 
-    /// Resolve the CLI program path based on tool type and overrides.
+    /// Resolve program candidates with fallbacks for the tool type.
     #[must_use]
-    pub fn resolve_program(&self) -> String {
-        if let Some(tool_type) = self.tool_type
-            && let Some(path) = self.tool_paths.get(&tool_type)
-        {
-            return path.clone();
+    pub fn resolve_programs(&self) -> Vec<String> {
+        let tool_type = self.tool_type.unwrap_or(ToolType::Cursor);
+        let mut programs = Vec::new();
+
+        if let Some(path) = self.tool_paths.get(&tool_type) {
+            push_unique(&mut programs, path);
         }
-        self.cli_program.clone()
+        push_unique(&mut programs, &self.cli_program);
+
+        match tool_type {
+            ToolType::Cursor => {
+                push_unique(&mut programs, "cursor-agent");
+                push_unique(&mut programs, "agent");
+                push_unique(&mut programs, "cursor");
+            }
+            ToolType::Opencode => {
+                push_unique(&mut programs, "opencode");
+            }
+        }
+
+        programs
+    }
+}
+
+fn push_unique(programs: &mut Vec<String>, value: &str) {
+    if !programs.iter().any(|existing| existing == value) {
+        programs.push(value.to_string());
     }
 }
 
@@ -137,12 +157,20 @@ mod tests {
             }
         }"#;
         let config: Config = serde_json::from_str(json).expect("valid config");
-        assert_eq!(config.resolve_program(), "/tmp/cursor-cli");
+        assert_eq!(
+            config.resolve_programs().first().map(String::as_str),
+            Some("/tmp/cursor-cli")
+        );
     }
 
     #[test]
     fn default_config_uses_cursor_agent() {
         let config = Config::default();
-        assert_eq!(config.resolve_program(), "cursor-agent");
+        assert!(
+            config
+                .resolve_programs()
+                .iter()
+                .any(|program| program == "cursor-agent")
+        );
     }
 }
