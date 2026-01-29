@@ -13,7 +13,7 @@ pub struct StepsFile {
 }
 
 impl StepsFile {
-    pub fn load_or_sync(plan_path: &Path, plan: &Plan) -> Result<Self> {
+    pub fn load_or_sync(plan_path: &Path, plan: &Plan) -> Result<(Self, bool)> {
         let steps_path = Self::path_for(plan_path);
         if steps_path.exists() {
             let contents = fs::read_to_string(&steps_path)
@@ -21,7 +21,7 @@ impl StepsFile {
             let parsed: Self = serde_json::from_str(&contents)
                 .with_context(|| format!("failed to parse steps file: {}", steps_path.display()))?;
             if parsed.steps == plan.steps {
-                return Ok(parsed);
+                return Ok((parsed, false));
             }
         }
 
@@ -29,7 +29,7 @@ impl StepsFile {
             steps: plan.steps.clone(),
         };
         steps.save(&steps_path)?;
-        Ok(steps)
+        Ok((steps, true))
     }
 
     #[must_use]

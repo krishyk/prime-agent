@@ -7,6 +7,7 @@ mod logging;
 mod plan;
 mod state;
 mod steps;
+mod version;
 
 use anyhow::Result;
 use clap::Parser;
@@ -18,6 +19,7 @@ use crate::logging::Logger;
 use crate::plan::Plan;
 use crate::state::StateFile;
 use crate::steps::StepsFile;
+use crate::version::Version;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -45,14 +47,14 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load_optional(cli.config.as_deref())?;
-    let plan = Plan::load(&cli.plan_path)?;
-    let steps = StepsFile::load_or_sync(&cli.plan_path, &plan)?;
     let state_path = cli
         .state
         .clone()
         .unwrap_or_else(|| PathBuf::from("state.json"));
     let mut state = StateFile::load(&state_path)?;
     let logger = Logger::new(cli.verbose)?;
+    let version = Version::load_bump_and_save()?;
+    logger.log_step(&format!("prime-agent version {}", version.as_string()));
     let workdir = cli
         .plan_path
         .parent()
@@ -61,11 +63,15 @@ fn main() -> Result<()> {
         plan_path: cli.plan_path,
         state_path: state_path.clone(),
         lifecycle: cli.lifecycle,
-        verbose: cli.verbose,
         workdir,
     };
 
     loop {
+        let plan = Plan::load(&options.plan_path)?;
+        let (steps, synced) = StepsFile::load_or_sync(&options.plan_path, &plan)?;
+        if synced {
+            logger.log_substep("steps.json synced with plan.md");
+        }
         let changed = run_lifecycle(&config, &steps, &plan, &mut state, &options, &logger)?;
         if changed {
             state.save(&state_path)?;

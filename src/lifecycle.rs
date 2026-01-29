@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::config::{Config, GateCommand};
+use crate::config::{Config, GateCommand, ToolType};
 use crate::logging::Logger;
 use crate::plan::{Plan, PlanStep};
 use crate::state::{StateFile, StepState};
@@ -17,7 +17,6 @@ pub struct RunOptions {
     pub plan_path: PathBuf,
     pub state_path: PathBuf,
     pub lifecycle: u8,
-    pub verbose: bool,
     pub workdir: PathBuf,
 }
 
@@ -144,36 +143,81 @@ fn run_cli_action(
     diff_path: Option<&Path>,
     logger: &Logger,
 ) -> Result<()> {
-    let mut args = config.cli_args.clone();
-    args.push("--action".to_string());
-    args.push(action.to_string());
-    args.push("--model".to_string());
-    args.push(model.to_string());
-    args.push("--plan".to_string());
-    args.push(options.plan_path.display().to_string());
-    args.push("--step-id".to_string());
-    args.push(step.id.clone());
-    args.push("--step-text".to_string());
-    args.push(step.text.clone());
-    args.push("--lifecycle".to_string());
-    args.push(options.lifecycle.to_string());
-
-    if let Some(diff) = diff_path {
-        args.push("--diff".to_string());
-        args.push(diff.display().to_string());
-    }
-
-    if options.verbose {
-        args.push("--verbose".to_string());
-    }
-
-    let program = config.resolve_program();
+    let (program, args) = build_tool_command(config, step, model, action, options, diff_path);
     run_command(
         &program,
         &args,
         Some(&options.workdir),
         logger,
         &format!("agent action ({action})"),
+    )
+}
+
+fn build_tool_command(
+    config: &Config,
+    step: &PlanStep,
+    model: &str,
+    action: &str,
+    options: &RunOptions,
+    diff_path: Option<&Path>,
+) -> (String, Vec<String>) {
+    let tool_type = config.tool_type.unwrap_or(ToolType::Cursor);
+    let program = config.resolve_program();
+    let prompt = build_prompt(step, action, options, diff_path);
+    let mut args = config.cli_args.clone();
+
+    match tool_type {
+        ToolType::Cursor => {
+            args.push("-p".to_string());
+            args.push(prompt);
+            args.push("--mode".to_string());
+            args.push("agent".to_string());
+            args.push("--output-format".to_string());
+            args.push("text".to_string());
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+        ToolType::Opencode => {
+            args.push("run".to_string());
+            args.push("--model".to_string());
+            args.push(model.to_string());
+            if let Some(diff) = diff_path {
+                args.push("--file".to_string());
+                args.push(diff.display().to_string());
+            }
+            args.push("--file".to_string());
+            args.push(options.plan_path.display().to_string());
+            args.push(prompt);
+        }
+    }
+
+    (program, args)
+}
+
+fn build_prompt(
+    step: &PlanStep,
+    action: &str,
+    options: &RunOptions,
+    diff_path: Option<&Path>,
+) -> String {
+    let diff_info = diff_path.map_or_else(
+        || "Diff file: none".to_string(),
+        |path| format!("Diff file: {}", path.display()),
+    );
+    format!(
+        "You are running non-interactively. Do not ask for confirmation. \
+Action: {action}\n\
+Lifecycle: {lifecycle}\n\
+Plan file: {plan}\n\
+Step ID: {step_id}\n\
+Step text: {step_text}\n\
+{diff_info}\n\
+Execute the step, apply necessary changes, and exit.",
+        action = action,
+        lifecycle = options.lifecycle,
+        plan = options.plan_path.display(),
+        step_id = step.id,
+        step_text = step.text
     )
 }
 
