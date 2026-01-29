@@ -1,10 +1,9 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-
-use crate::state::{StateFile, StepState};
 
 /// Parsed plan with ordered steps.
 #[derive(Debug, Clone)]
@@ -13,7 +12,7 @@ pub struct Plan {
 }
 
 /// A single plan step parsed from Markdown.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanStep {
     pub id: String,
     pub number: usize,
@@ -29,8 +28,8 @@ impl Plan {
     pub fn load(path: &Path) -> Result<Self> {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("failed to read plan file: {}", path.display()))?;
-        let step_re = Regex::new(r"^\s*(\d+)\.\s+(.+?)\s*$")
-            .context("failed to compile plan step regex")?;
+        let step_re =
+            Regex::new(r"^\s*(\d+)\.\s+(.+?)\s*$").context("failed to compile plan step regex")?;
         let mut steps = Vec::new();
         let mut seen_numbers = HashSet::new();
 
@@ -54,18 +53,6 @@ impl Plan {
         }
 
         Ok(Self { steps })
-    }
-
-    /// Return the next step matching the desired state.
-    #[must_use]
-    pub fn next_step_with_state<'a>(
-        &'a self,
-        state: &StateFile,
-        desired: StepState,
-    ) -> Option<&'a PlanStep> {
-        self.steps
-            .iter()
-            .find(|step| state.state_for(&step.id) == desired)
     }
 }
 

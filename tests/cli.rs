@@ -50,6 +50,10 @@ fn runs_lifecycle_and_updates_state() {
         .arg("1");
     cmd.assert().success();
 
+    let steps_path = temp.path().join("steps.json");
+    let steps_contents = fs::read_to_string(&steps_path).expect("read steps");
+    assert!(steps_contents.contains("First step"));
+
     let state_contents = fs::read_to_string(&state_path).expect("read state");
     let parsed: StateFile = serde_json::from_str(&state_contents).expect("parse state");
     assert_eq!(

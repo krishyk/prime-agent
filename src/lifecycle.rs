@@ -10,6 +10,7 @@ use crate::config::{Config, GateCommand};
 use crate::logging::Logger;
 use crate::plan::{Plan, PlanStep};
 use crate::state::{StateFile, StepState};
+use crate::steps::StepsFile;
 
 /// Runtime options for a lifecycle execution.
 pub struct RunOptions {
@@ -17,6 +18,7 @@ pub struct RunOptions {
     pub state_path: PathBuf,
     pub lifecycle: u8,
     pub verbose: bool,
+    pub workdir: PathBuf,
 }
 
 /// Execute a single lifecycle step and update state.
@@ -26,13 +28,18 @@ pub struct RunOptions {
 /// Returns an error if the agent action or gating commands fail.
 pub fn run_lifecycle(
     config: &Config,
+    steps: &StepsFile,
     plan: &Plan,
     state: &mut StateFile,
     options: &RunOptions,
     logger: &Logger,
 ) -> Result<bool> {
     let (current_state, next_state, action_label) = lifecycle_mapping(options.lifecycle)?;
-    let Some(step) = plan.next_step_with_state(state, current_state) else {
+    let Some(step) = steps
+        .steps
+        .iter()
+        .find(|step| state.state_for(&step.id) == current_state)
+    else {
         logger.log_step(&format!(
             "No step found in state '{}' for lifecycle {}",
             current_state.label(),
@@ -41,24 +48,31 @@ pub fn run_lifecycle(
         return Ok(false);
     };
 
+    if plan.steps.iter().all(|plan_step| plan_step.id != step.id) {
+        return Err(anyhow!(
+            "step {} not found in plan, steps.json may be out of sync",
+            step.id
+        ));
+    }
     logger.log_step(&format!(
         "Lifecycle {}: {} (step {}: {})",
         options.lifecycle, action_label, step.number, step.text
     ));
 
     logger.log_substep(&format!("State file: {}", options.state_path.display()));
+    logger.log_substep(&format!("Workdir: {}", options.workdir.display()));
     let model = config.model_for(options.lifecycle);
     logger.log_substep(&format!("Using model: {model}"));
     logger.log_substep(&format!("Log file: {}", logger.log_path().display()));
 
     let diff_path = if options.lifecycle >= 2 {
-        Some(write_git_diff(logger)?)
+        Some(write_git_diff(&options.workdir, logger)?)
     } else {
         None
     };
 
     let execution_result = if options.lifecycle == 5 {
-        run_gates(config, logger).and_then(|()| run_git_commit(step, options, logger))
+        run_gates(config, options, logger).and_then(|()| run_git_commit(step, options, logger))
     } else {
         run_cli_action(
             config,
@@ -69,7 +83,7 @@ pub fn run_lifecycle(
             diff_path.as_deref(),
             logger,
         )
-        .and_then(|()| run_gates(config, logger))
+        .and_then(|()| run_gates(config, options, logger))
     };
 
     if let Err(err) = execution_result {
@@ -154,10 +168,16 @@ fn run_cli_action(
     }
 
     let program = config.resolve_program();
-    run_command(&program, &args, logger, &format!("agent action ({action})"))
+    run_command(
+        &program,
+        &args,
+        Some(&options.workdir),
+        logger,
+        &format!("agent action ({action})"),
+    )
 }
 
-fn run_gates(config: &Config, logger: &Logger) -> Result<()> {
+fn run_gates(config: &Config, options: &RunOptions, logger: &Logger) -> Result<()> {
     logger.log_step("Gates: lint/build/test");
     let gates = if config.gates.is_empty() {
         default_gates()
@@ -168,7 +188,13 @@ fn run_gates(config: &Config, logger: &Logger) -> Result<()> {
     for gate in gates {
         let name = gate.name.unwrap_or_else(|| gate.command.clone());
         logger.log_substep(&format!("Running gate: {name}"));
-        run_command(&gate.command, &gate.args, logger, &format!("gate: {name}"))?;
+        run_command(
+            &gate.command,
+            &gate.args,
+            Some(&options.workdir),
+            logger,
+            &format!("gate: {name}"),
+        )?;
     }
 
     Ok(())
@@ -204,9 +230,10 @@ fn default_gates() -> Vec<GateCommand> {
     ]
 }
 
-fn write_git_diff(logger: &Logger) -> Result<PathBuf> {
+fn write_git_diff(workdir: &Path, logger: &Logger) -> Result<PathBuf> {
     let diff_output = Command::new("git")
         .args(["diff"])
+        .current_dir(workdir)
         .output()
         .context("failed to execute git diff")?;
 
@@ -229,7 +256,13 @@ fn write_git_diff(logger: &Logger) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn run_command(program: &str, args: &[String], logger: &Logger, label: &str) -> Result<()> {
+fn run_command(
+    program: &str,
+    args: &[String],
+    workdir: Option<&Path>,
+    logger: &Logger,
+    label: &str,
+) -> Result<()> {
     logger.log_substep(&format!(
         "Executing {}: {} {}",
         label,
@@ -237,10 +270,15 @@ fn run_command(program: &str, args: &[String], logger: &Logger, label: &str) -> 
         args.join(" ")
     ));
 
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(workdir) = workdir {
+        command.current_dir(workdir);
+    }
+    let mut child = command
         .spawn()
         .with_context(|| format!("failed to run command: {program}"))?;
 
@@ -291,12 +329,14 @@ fn run_git_commit(step: &PlanStep, options: &RunOptions, logger: &Logger) -> Res
     run_command(
         "git",
         &["add".to_string(), ".".to_string()],
+        Some(&options.workdir),
         logger,
         "git add",
     )?;
     run_command(
         "git",
         &["commit".to_string(), "-m".to_string(), message],
+        Some(&options.workdir),
         logger,
         &format!("git commit (lifecycle {})", options.lifecycle),
     )

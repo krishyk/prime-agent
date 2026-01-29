@@ -57,6 +57,18 @@ impl Config {
         Ok(parsed)
     }
 
+    /// Load configuration from a JSON file or return defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file is provided but cannot be read or parsed.
+    pub fn load_optional(path: Option<&Path>) -> Result<Self> {
+        match path {
+            Some(path) => Self::load(path),
+            None => Ok(Self::default()),
+        }
+    }
+
     /// Resolve the model name for a lifecycle with defaults.
     pub fn model_for(&self, lifecycle: u8) -> String {
         let key = lifecycle.to_string();
@@ -83,6 +95,19 @@ impl Config {
             return path.clone();
         }
         self.cli_program.clone()
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            cli_program: "cursor-agent".to_string(),
+            tool_type: Some(ToolType::Cursor),
+            tool_paths: HashMap::new(),
+            cli_args: Vec::new(),
+            lifecycles: HashMap::new(),
+            gates: Vec::new(),
+        }
     }
 }
 
@@ -113,5 +138,11 @@ mod tests {
         }"#;
         let config: Config = serde_json::from_str(json).expect("valid config");
         assert_eq!(config.resolve_program(), "/tmp/cursor-cli");
+    }
+
+    #[test]
+    fn default_config_uses_cursor_agent() {
+        let config = Config::default();
+        assert_eq!(config.resolve_program(), "cursor-agent");
     }
 }
