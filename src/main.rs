@@ -7,19 +7,17 @@ mod logging;
 mod plan;
 mod state;
 mod steps;
-mod version;
 
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 
 use crate::config::Config;
-use crate::lifecycle::{RunOptions, run_lifecycle};
+use crate::lifecycle::{RunOptions, next_action, run_lifecycle};
 use crate::logging::Logger;
 use crate::plan::Plan;
 use crate::state::StateFile;
 use crate::steps::StepsFile;
-use crate::version::Version;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -33,9 +31,9 @@ struct Cli {
     /// Path to the JSON config file
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Lifecycle step to execute (1-5)
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=5))]
-    lifecycle: u8,
+    /// Lifecycle override to execute (1-5)
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=5))]
+    lifecycle: Option<u8>,
     /// Enable verbose substep output
     #[arg(short, long)]
     verbose: bool,
@@ -47,22 +45,28 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load_optional(cli.config.as_deref())?;
+    let current_dir = std::env::current_dir()?;
+    let plan_path = if cli.plan_path.is_absolute() {
+        cli.plan_path
+    } else {
+        current_dir.join(cli.plan_path)
+    };
     let state_path = cli
         .state
         .clone()
-        .unwrap_or_else(|| PathBuf::from("state.json"));
+        .unwrap_or_else(|| PathBuf::from(".prime-agent/state.json"));
     let mut state = StateFile::load(&state_path)?;
     let logger = Logger::new(cli.verbose)?;
-    let version = Version::load_bump_and_save()?;
-    logger.log_step(&format!("prime-agent version {}", version.as_string()));
-    let workdir = cli
-        .plan_path
+    logger.log_step(&format!(
+        "prime-agent version {}",
+        env!("CARGO_PKG_VERSION")
+    ));
+    let workdir = plan_path
         .parent()
         .map_or_else(|| PathBuf::from("."), PathBuf::from);
     let options = RunOptions {
-        plan_path: cli.plan_path,
+        plan_path,
         state_path: state_path.clone(),
-        lifecycle: cli.lifecycle,
         workdir,
     };
 
@@ -72,7 +76,18 @@ fn main() -> Result<()> {
         if synced {
             logger.log_substep("steps.json synced with plan.md");
         }
-        let changed = run_lifecycle(&config, &steps, &plan, &mut state, &options, &logger)?;
+        let Some(next) = next_action(&steps, &state, cli.lifecycle)? else {
+            break;
+        };
+        let changed = run_lifecycle(
+            &config,
+            &plan,
+            &mut state,
+            &options,
+            &logger,
+            next.step,
+            next.lifecycle,
+        )?;
         if changed {
             state.save(&state_path)?;
         } else {

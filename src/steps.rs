@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::plan::{Plan, PlanStep};
 
 const STEPS_FILE_NAME: &str = "steps.json";
+const AGENT_DIR: &str = ".prime-agent";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StepsFile {
@@ -37,10 +38,15 @@ impl StepsFile {
         plan_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
+            .join(AGENT_DIR)
             .join(STEPS_FILE_NAME)
     }
 
     fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create steps dir: {}", parent.display()))?;
+        }
         let contents =
             serde_json::to_string_pretty(self).context("failed to serialize steps.json")?;
         fs::write(path, contents)

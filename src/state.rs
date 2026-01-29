@@ -102,6 +102,10 @@ impl StateFile {
     ///
     /// Returns an error if the file cannot be written.
     pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create state dir: {}", parent.display()))?;
+        }
         let contents = serde_json::to_string_pretty(self).context("failed to serialize state")?;
         fs::write(path, contents)
             .with_context(|| format!("failed to write state file: {}", path.display()))?;

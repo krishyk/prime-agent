@@ -8,5 +8,5 @@
 
 ## Versioning
 
-- Maintain a `VERSION` file at repo root.
 - Bump the patch version on every change and print it on every run of `prime-agent`.
+- Do not write version files to target project directories at runtime.

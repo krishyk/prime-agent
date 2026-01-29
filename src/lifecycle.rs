@@ -16,8 +16,49 @@ use crate::steps::StepsFile;
 pub struct RunOptions {
     pub plan_path: PathBuf,
     pub state_path: PathBuf,
-    pub lifecycle: u8,
     pub workdir: PathBuf,
+}
+
+pub struct NextAction<'a> {
+    pub step: &'a PlanStep,
+    pub lifecycle: u8,
+}
+
+pub fn next_action<'a>(
+    steps: &'a StepsFile,
+    state: &StateFile,
+    lifecycle_override: Option<u8>,
+) -> Result<Option<NextAction<'a>>> {
+    if let Some(lifecycle) = lifecycle_override {
+        let (current_state, _, _) = lifecycle_mapping(lifecycle)?;
+        let step = steps
+            .steps
+            .iter()
+            .find(|step| state.state_for(&step.id) == current_state);
+        return Ok(step.map(|step| NextAction { step, lifecycle }));
+    }
+
+    for step in &steps.steps {
+        match state.state_for(&step.id) {
+            StepState::Planned => return Ok(Some(NextAction { step, lifecycle: 1 })),
+            StepState::Implemented => return Ok(Some(NextAction { step, lifecycle: 2 })),
+            StepState::ImplementedChecked => return Ok(Some(NextAction { step, lifecycle: 3 })),
+            StepState::ImplementedTested => return Ok(Some(NextAction { step, lifecycle: 4 })),
+            StepState::ImplementedFinalized => return Ok(Some(NextAction { step, lifecycle: 5 })),
+            StepState::LifecycleError(lifecycle_stage) => {
+                if !(1..=5).contains(&lifecycle_stage) {
+                    return Err(anyhow!("invalid lifecycle error stage: {lifecycle_stage}"));
+                }
+                return Ok(Some(NextAction {
+                    step,
+                    lifecycle: lifecycle_stage,
+                }));
+            }
+            StepState::ImplementedCommitted => {}
+        }
+    }
+
+    Ok(None)
 }
 
 /// Execute a single lifecycle step and update state.
@@ -27,25 +68,23 @@ pub struct RunOptions {
 /// Returns an error if the agent action or gating commands fail.
 pub fn run_lifecycle(
     config: &Config,
-    steps: &StepsFile,
     plan: &Plan,
     state: &mut StateFile,
     options: &RunOptions,
     logger: &Logger,
+    step: &PlanStep,
+    lifecycle: u8,
 ) -> Result<bool> {
-    let (current_state, next_state, action_label) = lifecycle_mapping(options.lifecycle)?;
-    let Some(step) = steps
-        .steps
-        .iter()
-        .find(|step| state.state_for(&step.id) == current_state)
-    else {
-        logger.log_step(&format!(
-            "No step found in state '{}' for lifecycle {}",
-            current_state.label(),
-            options.lifecycle
+    let (current_state, next_state, action_label) = lifecycle_mapping(lifecycle)?;
+    let step_state = state.state_for(&step.id);
+    if step_state != current_state && step_state != StepState::LifecycleError(lifecycle) {
+        return Err(anyhow!(
+            "step {} in state '{}' cannot run lifecycle {}",
+            step.id,
+            step_state.label(),
+            lifecycle
         ));
-        return Ok(false);
-    };
+    }
 
     if plan.steps.iter().all(|plan_step| plan_step.id != step.id) {
         return Err(anyhow!(
@@ -55,16 +94,16 @@ pub fn run_lifecycle(
     }
     logger.log_step(&format!(
         "Lifecycle {}: {} (step {}: {})",
-        options.lifecycle, action_label, step.number, step.text
+        lifecycle, action_label, step.number, step.text
     ));
 
     logger.log_substep(&format!("State file: {}", options.state_path.display()));
     logger.log_substep(&format!("Workdir: {}", options.workdir.display()));
-    let model = config.model_for(options.lifecycle);
+    let model = config.model_for(lifecycle);
     logger.log_substep(&format!("Using model: {model}"));
     logger.log_substep(&format!("Log file: {}", logger.log_path().display()));
 
-    let diff_path = if options.lifecycle >= 2 {
+    let diff_path = if lifecycle >= 2 {
         Some(
             write_git_diff(&options.workdir, logger)
                 .with_context(|| "failed to capture git diff")?,
@@ -73,22 +112,21 @@ pub fn run_lifecycle(
         None
     };
 
-    let execution_result = if options.lifecycle == 5 {
+    let execution_result = if lifecycle == 5 {
         run_gates(config, options, logger)
-            .and_then(|()| run_git_commit(step, options, logger))
-            .with_context(|| format!("lifecycle {}: git commit failed", options.lifecycle))
+            .and_then(|()| run_git_commit(step, options, logger, lifecycle))
+            .with_context(|| format!("lifecycle {lifecycle}: git commit failed"))
     } else {
-        run_cli_action(
-            config,
+        let action = ActionContext {
             step,
-            &model,
-            action_label,
-            options,
-            diff_path.as_deref(),
-            logger,
-        )
-        .and_then(|()| run_gates(config, options, logger))
-        .with_context(|| format!("lifecycle {}: agent action failed", options.lifecycle))
+            model: &model,
+            action: action_label,
+            lifecycle,
+            diff_path: diff_path.as_deref(),
+        };
+        run_cli_action(config, options, logger, &action)
+            .and_then(|()| run_gates(config, options, logger))
+            .with_context(|| format!("lifecycle {lifecycle}: agent action failed"))
     }
     .with_context(|| {
         format!(
@@ -99,7 +137,7 @@ pub fn run_lifecycle(
 
     if let Err(err) = execution_result {
         let details = vec![
-            format!("Lifecycle: {}", options.lifecycle),
+            format!("Lifecycle: {}", lifecycle),
             format!("Action: {}", action_label),
             format!("Step ID: {}", step.id),
             format!("Step number: {}", step.number),
@@ -107,17 +145,11 @@ pub fn run_lifecycle(
             format!("Workdir: {}", options.workdir.display()),
             format!("State file: {}", options.state_path.display()),
         ];
-        state.set_state(&step.id, StepState::lifecycle_error(options.lifecycle));
+        state.set_state(&step.id, StepState::lifecycle_error(lifecycle));
         if let Err(save_err) = state.save(&options.state_path) {
             logger.log_error(&format!("Failed to save error state: {save_err}"));
         }
-        logger.log_error_verbose(
-            &format!(
-                "Lifecycle {lifecycle} failed: {err}",
-                lifecycle = options.lifecycle
-            ),
-            &details,
-        );
+        logger.log_error_verbose(&format!("Lifecycle {lifecycle} failed: {err}"), &details);
         return Err(err);
     }
 
@@ -158,60 +190,67 @@ fn lifecycle_mapping(lifecycle: u8) -> Result<(StepState, StepState, &'static st
     Ok(mapping)
 }
 
+struct ActionContext<'a> {
+    step: &'a PlanStep,
+    model: &'a str,
+    action: &'static str,
+    lifecycle: u8,
+    diff_path: Option<&'a Path>,
+}
+
 fn run_cli_action(
     config: &Config,
-    step: &PlanStep,
-    model: &str,
-    action: &str,
     options: &RunOptions,
-    diff_path: Option<&Path>,
     logger: &Logger,
+    action: &ActionContext<'_>,
 ) -> Result<()> {
-    let (programs, args) = build_tool_command(config, step, model, action, options, diff_path);
+    let (programs, args) = build_tool_command(config, options, action);
     run_command_with_fallback(
         &programs,
         &args,
         Some(&options.workdir),
         logger,
-        &format!("agent action ({action})"),
+        &format!("agent action ({})", action.action),
     )
     .with_context(|| {
-        format!(
-            "failed to run agent tool for lifecycle {}",
-            options.lifecycle
-        )
+        let lifecycle = action.lifecycle;
+        format!("failed to run agent tool for lifecycle {lifecycle}")
     })
 }
 
 fn build_tool_command(
     config: &Config,
-    step: &PlanStep,
-    model: &str,
-    action: &str,
     options: &RunOptions,
-    diff_path: Option<&Path>,
+    action: &ActionContext<'_>,
 ) -> (Vec<String>, Vec<String>) {
     let tool_type = config.tool_type.unwrap_or(ToolType::Cursor);
     let programs = config.resolve_programs();
-    let prompt = build_prompt(step, action, options, diff_path);
+    let prompt = build_prompt(
+        action.step,
+        action.action,
+        options,
+        action.diff_path,
+        action.lifecycle,
+    );
     let mut args = config.cli_args.clone();
 
     match tool_type {
         ToolType::Cursor => {
-            args.push("-p".to_string());
-            args.push(prompt);
-            args.push("--mode".to_string());
-            args.push("agent".to_string());
+            args.push("--print".to_string());
             args.push("--output-format".to_string());
             args.push("text".to_string());
             args.push("--model".to_string());
-            args.push(model.to_string());
+            args.push(action.model.to_string());
+            args.push("--workspace".to_string());
+            args.push(options.workdir.display().to_string());
+            args.push("--force".to_string());
+            args.push(prompt);
         }
         ToolType::Opencode => {
             args.push("run".to_string());
             args.push("--model".to_string());
-            args.push(model.to_string());
-            if let Some(diff) = diff_path {
+            args.push(action.model.to_string());
+            if let Some(diff) = action.diff_path {
                 args.push("--file".to_string());
                 args.push(diff.display().to_string());
             }
@@ -229,6 +268,7 @@ fn build_prompt(
     action: &str,
     options: &RunOptions,
     diff_path: Option<&Path>,
+    lifecycle: u8,
 ) -> String {
     let diff_info = diff_path.map_or_else(
         || "Diff file: none".to_string(),
@@ -244,7 +284,7 @@ Step text: {step_text}\n\
 {diff_info}\n\
 Execute the step, apply necessary changes, and exit.",
         action = action,
-        lifecycle = options.lifecycle,
+        lifecycle = lifecycle,
         plan = options.plan_path.display(),
         step_id = step.id,
         step_text = step.text
@@ -338,13 +378,21 @@ fn run_command_with_fallback(
     label: &str,
 ) -> Result<()> {
     let mut last_error = None;
+    let path_env = std::env::var("PATH").unwrap_or_else(|_| "<missing>".to_string());
+    let workdir_display =
+        workdir.map_or_else(|| "<none>".to_string(), |path| path.display().to_string());
     for program in programs {
         match run_command_once(program, args, workdir, logger, label) {
             Ok(()) => return Ok(()),
             Err(CommandError::NotFound(not_found)) => {
                 logger.log_error_verbose(
                     "Command not found",
-                    &[format!("Program: {not_found}"), format!("Label: {label}")],
+                    &[
+                        format!("Program: {not_found}"),
+                        format!("Label: {label}"),
+                        format!("Workdir: {workdir_display}"),
+                        format!("PATH: {path_env}"),
+                    ],
                 );
                 last_error = Some(CommandError::NotFound(not_found));
             }
@@ -446,10 +494,12 @@ fn run_command_once(
 
     if !status.success() {
         let stderr_tail = format!("Exit status: {status}");
+        let command_line = format!("{program} {}", args.join(" "));
         let detail = vec![
             format!("Program: {program}"),
             format!("Label: {label}"),
             format!("Args: {}", args.join(" ")),
+            format!("Command: {command_line}"),
             stderr_tail,
         ];
         logger.log_error_verbose("Command failed", &detail);
@@ -461,7 +511,12 @@ fn run_command_once(
     Ok(())
 }
 
-fn run_git_commit(step: &PlanStep, options: &RunOptions, logger: &Logger) -> Result<()> {
+fn run_git_commit(
+    step: &PlanStep,
+    options: &RunOptions,
+    logger: &Logger,
+    lifecycle: u8,
+) -> Result<()> {
     let message = format!(
         "stage implemented-finalized: step {} - {}",
         step.number, step.text
@@ -478,6 +533,6 @@ fn run_git_commit(step: &PlanStep, options: &RunOptions, logger: &Logger) -> Res
         &["commit".to_string(), "-m".to_string(), message],
         Some(&options.workdir),
         logger,
-        &format!("git commit (lifecycle {})", options.lifecycle),
+        &format!("git commit (lifecycle {lifecycle})"),
     )
 }
