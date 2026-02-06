@@ -19,8 +19,10 @@ use crate::skills_store::SkillsStore;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let version = env!("CARGO_PKG_VERSION");
-    println!("\u{001b}[32mprime-agent({version})\u{001b}[0m");
+    if should_print_banner(&cli) {
+        let version = env!("CARGO_PKG_VERSION");
+        println!("\u{001b}[32mprime-agent({version})\u{001b}[0m");
+    }
 
     let overrides = parse_config_overrides(&cli.config_overrides)?;
 
@@ -52,17 +54,10 @@ fn main() -> Result<()> {
             let content = std::fs::read_to_string(&path)?;
             skills_store.save_skill(&name, &content)?;
         }
-        Command::Sync => {
-            sync::run_sync(&skills_store, &agents_path)?;
-        }
-        Command::SyncRemote => {
-            sync::run_sync_remote(&skills_store, &agents_path)?;
-        }
-        Command::List => {
-            for name in skills_store.list_skill_names()? {
-                println!("{name}");
-            }
-        }
+        Command::Sync => run_sync_cmd(&skills_store, &agents_path)?,
+        Command::SyncRemote => run_sync_remote_cmd(&skills_store, &agents_path)?,
+        Command::List { fragment } => run_list_cmd(&skills_store, fragment)?,
+        Command::Local => run_local_cmd(&skills_store, &agents_path)?,
         Command::Config { .. } => {
             unreachable!("config command handled before skills setup");
         }
@@ -86,6 +81,77 @@ fn main() -> Result<()> {
                     .with_context(|| format!("failed to write '{}'", agents_path.display()))?;
             }
             skills_store.delete_skill(&name)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_sync_cmd(skills_store: &SkillsStore, agents_path: &Path) -> Result<()> {
+    sync::run_sync(skills_store, agents_path)
+}
+
+fn run_sync_remote_cmd(skills_store: &SkillsStore, agents_path: &Path) -> Result<()> {
+    sync::run_sync_remote(skills_store, agents_path)
+}
+
+fn run_list_cmd(skills_store: &SkillsStore, fragment: Option<String>) -> Result<()> {
+    let mut skills = skills_store.list_skill_names()?;
+    if let Some(fragment) = fragment {
+        skills.retain(|name| name.contains(&fragment));
+        println!("{}", skills.join(" "));
+    } else {
+        let mut first = true;
+        for name in skills {
+            if !first {
+                println!();
+            }
+            first = false;
+            println!("{name}");
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::missing_const_for_fn)]
+fn should_print_banner(cli: &Cli) -> bool {
+    !matches!(
+        &cli.command,
+        Command::List {
+            fragment: Some(_),
+        }
+    )
+}
+
+fn run_local_cmd(skills_store: &SkillsStore, agents_path: &Path) -> Result<()> {
+    let agents_doc = if agents_path.exists() {
+        let contents = std::fs::read_to_string(agents_path)
+            .with_context(|| format!("failed to read '{}'", agents_path.display()))?;
+        Some(agents_md::AgentsDoc::parse(&contents)?)
+    } else {
+        None
+    };
+    let Some(doc) = agents_doc.as_ref() else {
+        return Ok(());
+    };
+    let section_names = doc.section_names();
+    if section_names.is_empty() {
+        return Ok(());
+    }
+    let statuses = sync::compute_sync_status(skills_store, agents_doc.as_ref())?;
+    for name in section_names {
+        match statuses.get(&name) {
+            Some(sync::SyncStatus::Local) => {
+                println!("{name} (out of sync: local)");
+            }
+            Some(sync::SyncStatus::Conflict) => {
+                println!("{name} (out of sync: conflict)");
+            }
+            Some(sync::SyncStatus::Remote) => {
+                println!("{name} (out of sync: remote)");
+            }
+            _ => {
+                println!("{name}");
+            }
         }
     }
     Ok(())

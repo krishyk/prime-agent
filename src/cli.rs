@@ -39,7 +39,12 @@ pub enum Command {
     /// Sync skills and pull remote changes
     SyncRemote,
     /// List available skills
-    List,
+    List {
+        /// Optional substring to filter skills
+        fragment: Option<String>,
+    },
+    /// List local skills and sync status
+    Local,
     /// Get or set configuration values
     Config {
         #[command(subcommand)]

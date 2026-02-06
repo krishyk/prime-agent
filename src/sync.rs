@@ -2,20 +2,21 @@ use crate::agents_md::{AgentSection, AgentsDoc};
 use crate::skills_store::SkillsStore;
 use anyhow::{bail, Context, Result};
 use similar::{ChangeTag, TextDiff};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
 pub fn run_sync(skills_store: &SkillsStore, agents_path: &Path) -> Result<()> {
-    let (mut agents_doc, original_agents) = read_agents_doc(agents_path)?;
-    let mut all_names = BTreeSet::new();
-
-    for name in agents_doc.section_names() {
-        all_names.insert(name);
+    if !agents_path.exists() {
+        commit_skills_repo(skills_store.root())?;
+        return Ok(());
     }
-    for name in skills_store.list_skill_names()? {
+    let (mut agents_doc, original_agents) = read_agents_doc(agents_path)?;
+    print_sync_status(skills_store, Some(&agents_doc))?;
+    let mut all_names = BTreeSet::new();
+    for name in agents_doc.section_names() {
         all_names.insert(name);
     }
 
@@ -29,11 +30,6 @@ pub fn run_sync(skills_store: &SkillsStore, agents_path: &Path) -> Result<()> {
             (false, Some(section)) => {
                 skills_store.save_skill(&name, &section.content_string())?;
             }
-            (true, None) => {
-                let content = skills_store.load_skill(&name)?;
-                agents_doc.upsert_section(AgentSection::from_content(name, &content));
-                updated = true;
-            }
             (true, Some(section)) => {
                 let skill_content = skills_store.load_skill(&name)?;
                 let agents_content = section.content_string();
@@ -44,7 +40,7 @@ pub fn run_sync(skills_store: &SkillsStore, agents_path: &Path) -> Result<()> {
                     updated = true;
                 }
             }
-            (false, None) => {}
+            (true | false, None) => {}
         }
     }
 
@@ -155,6 +151,74 @@ fn prompt_choice() -> Result<Choice> {
 
 fn normalize_content(content: &str) -> String {
     content.replace("\r\n", "\n").trim_end_matches('\n').to_string()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncStatus {
+    InSync,
+    Local,
+    Remote,
+    Conflict,
+}
+
+pub fn compute_sync_status(
+    skills_store: &SkillsStore,
+    agents_doc: Option<&AgentsDoc>,
+) -> Result<BTreeMap<String, SyncStatus>> {
+    if agents_doc.is_none() || agents_doc.is_some_and(|doc| doc.section_names().is_empty()) {
+        return Ok(BTreeMap::new());
+    }
+    let mut skills_map = HashMap::new();
+    for name in skills_store.list_skill_names()? {
+        let content = skills_store.load_skill(&name)?;
+        skills_map.insert(name, normalize_content(&content));
+    }
+    let mut agents_map = HashMap::new();
+    if let Some(doc) = agents_doc {
+        for name in doc.section_names() {
+            if let Some(section) = doc.get_section(&name) {
+                agents_map.insert(name, normalize_content(&section.content_string()));
+            }
+        }
+    }
+
+    let mut names = BTreeSet::new();
+    names.extend(skills_map.keys().cloned());
+    names.extend(agents_map.keys().cloned());
+
+    let mut statuses = BTreeMap::new();
+    for name in names {
+        match (skills_map.get(&name), agents_map.get(&name)) {
+            (Some(local), Some(remote)) => {
+                if local == remote {
+                    statuses.insert(name, SyncStatus::InSync);
+                } else {
+                    statuses.insert(name, SyncStatus::Conflict);
+                }
+            }
+            (Some(_), None) => {
+                statuses.insert(name, SyncStatus::Local);
+            }
+            (None, Some(_)) => {
+                statuses.insert(name, SyncStatus::Remote);
+            }
+            (None, None) => {}
+        }
+    }
+    Ok(statuses)
+}
+
+fn print_sync_status(skills_store: &SkillsStore, agents_doc: Option<&AgentsDoc>) -> Result<()> {
+    let statuses = compute_sync_status(skills_store, agents_doc)?;
+    for (name, status) in statuses {
+        match status {
+            SyncStatus::InSync => {}
+            SyncStatus::Local => println!("{name} (out of sync: local)"),
+            SyncStatus::Remote => println!("{name} (out of sync: remote)"),
+            SyncStatus::Conflict => println!("{name} (out of sync: conflict)"),
+        }
+    }
+    Ok(())
 }
 
 fn git_pull_rebase(root: &Path) -> Result<()> {

@@ -1,6 +1,8 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
+use predicates::str::contains as contains_text;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -167,25 +169,25 @@ fn personal_instructions_are_preserved() {
     let updated = fs::read_to_string(default_agents_path(&temp)).expect("agents");
     assert!(updated.contains("My Personal Notes"));
     assert!(updated.contains("Trailing notes stay here."));
-    assert!(updated.contains("<!-- prime-agent(Start alpha) -->"));
+    assert!(!updated.contains("<!-- prime-agent(Start alpha) -->"));
 }
 
 #[test]
-fn sync_adds_new_skill_to_agents() {
+fn sync_does_not_add_missing_skills_to_agents() {
     let temp = TempDir::new().expect("temp dir");
     let skills_dir = temp.path().join("skills");
     write_config(&temp, &skills_dir);
     fs::create_dir_all(&skills_dir).expect("skills dir");
     fs::create_dir_all(skills_dir.join("alpha")).expect("alpha dir");
     fs::write(skills_dir.join("alpha/SKILL.md"), "From skill\n").expect("skill");
+    fs::write(default_agents_path(&temp), "# Notes\n").expect("agents");
 
     let mut cmd = cmd_with_skills_dir(&temp, &skills_dir);
     cmd.arg("sync");
     cmd.assert().success();
 
     let agents = fs::read_to_string(default_agents_path(&temp)).expect("agents");
-    assert!(agents.contains("<!-- prime-agent(Start alpha) -->"));
-    assert!(agents.contains("From skill"));
+    assert_eq!(agents, "# Notes\n");
 }
 
 #[test]
@@ -477,8 +479,32 @@ fn list_outputs_skill_names() {
     cmd.arg("list");
     cmd.assert()
         .success()
-        .stdout(contains("alpha\n"))
-        .stdout(contains("beta\n"));
+        .stdout(contains("alpha\n\nbeta\n"));
+}
+
+#[test]
+fn list_marks_out_of_sync_skills() {
+    let temp = TempDir::new().expect("temp dir");
+    let skills_dir = temp.path().join("skills");
+    write_config(&temp, &skills_dir);
+    fs::create_dir_all(skills_dir.join("alpha")).expect("alpha dir");
+    fs::write(skills_dir.join("alpha/SKILL.md"), "Alpha\n").expect("alpha");
+
+    let agents = [
+        "<!-- prime-agent(Start alpha) -->",
+        "## alpha",
+        "Changed",
+        "<!-- prime-agent(End alpha) -->",
+        "",
+    ]
+    .join("\n");
+    fs::write(default_agents_path(&temp), agents).expect("agents");
+
+    let mut cmd = cmd_with_skills_dir(&temp, &skills_dir);
+    cmd.arg("local");
+    cmd.assert()
+        .success()
+        .stdout(contains("alpha (out of sync: conflict)\n"));
 }
 
 #[test]
@@ -536,6 +562,83 @@ fn sync_commits_skills_repo() {
 
     let count = git_output(&skills_dir, &["rev-list", "--count", "HEAD"]);
     assert_eq!(count.trim(), "2");
+}
+
+#[test]
+fn list_with_fragment_outputs_single_line() {
+    let temp = TempDir::new().expect("temp dir");
+    let skills_dir = temp.path().join("skills");
+    write_config(&temp, &skills_dir);
+    fs::create_dir_all(skills_dir.join("zephyr-a")).expect("zephyr-a dir");
+    fs::create_dir_all(skills_dir.join("zephyr-b")).expect("zephyr-b dir");
+    fs::create_dir_all(skills_dir.join("other")).expect("other dir");
+    fs::write(skills_dir.join("zephyr-a/SKILL.md"), "A\n").expect("skill");
+    fs::write(skills_dir.join("zephyr-b/SKILL.md"), "B\n").expect("skill");
+    fs::write(skills_dir.join("other/SKILL.md"), "C\n").expect("skill");
+
+    let mut cmd = cmd_with_skills_dir(&temp, &skills_dir);
+    cmd.arg("list").arg("zephyr");
+    cmd.assert()
+        .success()
+        .stdout(contains("zephyr-a zephyr-b\n"))
+        .stdout(contains_text("prime-agent(").not());
+}
+
+#[test]
+fn local_marks_out_of_sync_by_source() {
+    let temp = TempDir::new().expect("temp dir");
+    let skills_dir = temp.path().join("skills");
+    write_config(&temp, &skills_dir);
+    fs::create_dir_all(skills_dir.join("alpha")).expect("alpha dir");
+    fs::write(skills_dir.join("alpha/SKILL.md"), "Alpha\n").expect("skill");
+    let agents = [
+        "<!-- prime-agent(Start alpha) -->",
+        "## alpha",
+        "Remote",
+        "<!-- prime-agent(End alpha) -->",
+        "",
+    ]
+    .join("\n");
+    fs::write(default_agents_path(&temp), agents).expect("agents");
+
+    let mut cmd = cmd_with_skills_dir(&temp, &skills_dir);
+    cmd.arg("local");
+    cmd.assert()
+        .success()
+        .stdout(contains("alpha (out of sync: conflict)\n"));
+}
+
+#[test]
+fn local_without_agents_does_not_mark_out_of_sync() {
+    let temp = TempDir::new().expect("temp dir");
+    let skills_dir = temp.path().join("skills");
+    write_config(&temp, &skills_dir);
+    fs::create_dir_all(skills_dir.join("alpha")).expect("alpha dir");
+    fs::write(skills_dir.join("alpha/SKILL.md"), "Alpha\n").expect("skill");
+
+    let mut cmd = cmd_with_skills_dir(&temp, &skills_dir);
+    cmd.arg("local");
+    cmd.assert()
+        .success()
+        .stdout(contains_text("alpha").not())
+        .stdout(contains_text("out of sync").not());
+}
+
+#[test]
+fn local_with_empty_agents_does_not_mark_out_of_sync() {
+    let temp = TempDir::new().expect("temp dir");
+    let skills_dir = temp.path().join("skills");
+    write_config(&temp, &skills_dir);
+    fs::create_dir_all(skills_dir.join("alpha")).expect("alpha dir");
+    fs::write(skills_dir.join("alpha/SKILL.md"), "Alpha\n").expect("skill");
+    fs::write(default_agents_path(&temp), "").expect("agents");
+
+    let mut cmd = cmd_with_skills_dir(&temp, &skills_dir);
+    cmd.arg("local");
+    cmd.assert()
+        .success()
+        .stdout(contains_text("alpha").not())
+        .stdout(contains_text("out of sync").not());
 }
 
 #[test]
