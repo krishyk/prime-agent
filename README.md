@@ -1,3 +1,7 @@
+# 100% vibe coded
+
+i have not looked at ANY code.  I have not looked at any tests, i have no idea what the hell is happening here.  Just accept AI Love into your heart and die from the greatest increase of productivity ever
+
 # prime-agent
 
 Skill-driven AGENTS.md builder and synchronizer for managing reusable
